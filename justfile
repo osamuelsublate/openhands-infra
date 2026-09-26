@@ -3,6 +3,9 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 host := env("OH_HOST", "deploy@179.199.150.4")
 dir := "/opt/openhands"
+
+# conexão SSH multiplexada: o host limita a 6 conexões/30s por IP (ufw limit)
+ssh := "ssh -o ControlMaster=auto -o ControlPath=~/.ssh/cm-%r@%h:%p -o ControlPersist=120"
 ansible := "uvx --from ansible-core==2.21.4 ansible-playbook"
 galaxy := "uvx --from ansible-core==2.21.4 ansible-galaxy"
 
@@ -57,7 +60,7 @@ provision-check:
 # estado de segurança do host (sshd efetivo, UFW, fail2ban, portas abertas)
 [group('host')]
 audit:
-    ssh {{ host }} 'sudo sshd -T | grep -Ei "^(permitrootlogin|passwordauthentication|allowusers|maxauthtries)"; echo; sudo ufw status verbose; echo; sudo fail2ban-client status sshd; echo; sudo ss -tlnpu | grep -v 127.0.0'
+    {{ ssh }} {{ host }} 'sudo sshd -T | grep -Ei "^(permitrootlogin|passwordauthentication|allowusers|maxauthtries)"; echo; sudo ufw status verbose; echo; sudo fail2ban-client status sshd; echo; sudo ss -tlnpu | grep -v 127.0.0'
 
 # ─────────────────────────── segredos (SOPS + age) ───────────────────────────
 
@@ -91,7 +94,7 @@ grafana-password:
 # o que mudaria no servidor (sem aplicar)
 [group('deploy')]
 diff:
-    rsync -azn --delete --checksum --itemize-changes --exclude '.env' --exclude '.deploys' stack/ {{ host }}:{{ dir }}/
+    RSYNC_RSH="{{ ssh }}" rsync -azn --delete --checksum --itemize-changes --exclude '.env' --exclude '.deploys' stack/ {{ host }}:{{ dir }}/
 
 # valida, sincroniza, envia segredos e sobe a stack
 [confirm("Fazer deploy em produção? (y/N)")]
@@ -102,33 +105,33 @@ deploy: _clean-tree validate
 # status dos containers
 [group('deploy')]
 ps:
-    ssh {{ host }} "cd {{ dir }} && docker compose ps --format 'table {{{{.Service}}\t{{{{.Status}}\t{{{{.Image}}'"
+    {{ ssh }} {{ host }} "cd {{ dir }} && docker compose ps --format 'table {{{{.Service}}\t{{{{.Status}}\t{{{{.Image}}'"
 
 # logs de um serviço (ou de todos): just logs agent-canvas
 [group('deploy')]
 logs svc="":
-    ssh -t {{ host }} 'cd {{ dir }} && docker compose logs -f --tail=200 {{ svc }}'
+    {{ ssh }} -t {{ host }} 'cd {{ dir }} && docker compose logs -f --tail=200 {{ svc }}'
 
 # reinicia um serviço: just restart egress-proxy
 [group('deploy')]
 restart svc:
-    ssh {{ host }} "cd {{ dir }} && docker compose restart {{ svc }}"
+    {{ ssh }} {{ host }} "cd {{ dir }} && docker compose restart {{ svc }}"
 
 # histórico de deploys (commit + data)
 [group('deploy')]
 history:
-    ssh {{ host }} 'tail -20 {{ dir }}/.deploys'
+    {{ ssh }} {{ host }} 'tail -20 {{ dir }}/.deploys'
 
 # roda um backup agora (profile backup precisa estar ligado)
 [group('deploy')]
 backup-now:
-    ssh {{ host }} "cd {{ dir }} && docker compose exec backup backup"
+    {{ ssh }} {{ host }} "cd {{ dir }} && docker compose exec backup backup"
 
 # túnel para uma UI interna, ex.: just tunnel prometheus 9090
 [group('deploy')]
 tunnel svc port:
     @echo "abrindo http://localhost:{{ port }} → {{ svc }}:{{ port }} (Ctrl+C para fechar)"
-    ssh -N -L {{ port }}:$(ssh {{ host }} "docker inspect -f '{{{{range .NetworkSettings.Networks}}{{{{.IPAddress}} {{{{end}}' openhands-{{ svc }}-1" | awk '{print $1}'):{{ port }} {{ host }}
+    {{ ssh }} -N -L {{ port }}:$({{ ssh }} {{ host }} "docker inspect -f '{{{{range .NetworkSettings.Networks}}{{{{.IPAddress}} {{{{end}}' openhands-{{ svc }}-1" | awk '{print $1}'):{{ port }} {{ host }}
 
 _clean-tree:
     @git diff --quiet && git diff --cached --quiet || (echo "há mudanças não commitadas: commite antes do deploy" >&2; exit 1)

@@ -11,6 +11,12 @@ readonly DIR="${2:?uso: deploy.sh user@host dir}"
 readonly SECRETS=secrets/prod.sops.env
 step() { printf '\033[1m▸ %s\033[0m\n' "$1"; }
 
+# Uma única conexão SSH multiplexada para todo o deploy: o host tem `ufw limit`
+# na porta 22 (6 conexões/30s por IP) e o deploy abre várias em sequência.
+SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$HOME/.ssh/cm-%r@%h:%p" -o ControlPersist=120)
+ssh() { command ssh "${SSH_OPTS[@]}" "$@"; }
+export RSYNC_RSH="ssh ${SSH_OPTS[*]}"
+
 [[ -f "$SECRETS" ]] || { echo "falta $SECRETS (just secrets-init)" >&2; exit 1; }
 
 step "conferindo segredos"
