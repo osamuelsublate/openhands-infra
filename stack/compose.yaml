@@ -75,6 +75,27 @@ services:
         limits: { cpus: "1.0", memory: 256m, pids: 256 }
 
   # ────────────────────────────── OpenHands ──────────────────────────────
+  # Roda uma vez antes do agent-canvas: /home/openhands/workspace não existe na
+  # imagem, então o Docker cria o volume como root e o agente (UID 10001, sem
+  # capabilities) não consegue escrever nele.
+  init-volumes:
+    image: ghcr.io/openhands/agent-canvas:1.24.0@sha256:ad0829a7082a71ddfd2d16c1fae5a2172e4ca5a34eba7f03b69bd5b9b1bc54d7
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        for d in /home/openhands/.openhands /home/openhands/workspace /projects; do
+          [ "$$(stat -c %u:%g "$$d")" = "10001:10001" ] || { chown 10001:10001 "$$d"; echo "chown $$d"; }
+        done
+    volumes:
+      - canvas_state:/home/openhands/.openhands
+      - canvas_workspace:/home/openhands/workspace
+      - canvas_projects:/projects
+    logging: *logging
+
   agent-canvas:
     <<: *hardened
     image: ghcr.io/openhands/agent-canvas:1.24.0@sha256:ad0829a7082a71ddfd2d16c1fae5a2172e4ca5a34eba7f03b69bd5b9b1bc54d7
@@ -115,6 +136,7 @@ services:
     shm_size: 1g # Chromium da ferramenta de browser
     networks: [canvas_front, agent_egress, telemetry]
     depends_on:
+      init-volumes: { condition: service_completed_successfully }
       egress-proxy: { condition: service_started }
       alloy: { condition: service_started, required: false }
     labels:
