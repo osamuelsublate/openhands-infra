@@ -1,0 +1,343 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// Grafana Alloy: coletor único de LOGS e TRACES (as métricas o Prometheus coleta direto).
+//
+//   logs dos containers (via socket-proxy só-leitura) ─┐
+//   journald do host (ssh, sudo, fail2ban, ufw)       ─┼─▶ Loki
+//   logs OTLP do SDK dos agentes                      ─┤
+//   span logs (1 linha por chamada de LLM)            ─┘
+//   traces OTLP do SDK dos agentes ─▶ redação de segredos ─▶ Tempo
+// ══════════════════════════════════════════════════════════════════════════════
+
+logging {
+	level  = "info"
+	format = "json"
+}
+
+// ─────────────────────────────── Containers ───────────────────────────────
+
+discovery.docker "containers" {
+	host             = "tcp://docker-socket-proxy:2375"
+	refresh_interval = "15s"
+}
+
+discovery.relabel "containers" {
+	targets = discovery.docker.containers.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+		target_label  = "project"
+	}
+}
+
+loki.source.docker "containers" {
+	host             = "tcp://docker-socket-proxy:2375"
+	targets          = discovery.relabel.containers.output
+	labels           = {source = "docker"}
+	refresh_interval = "15s"
+	forward_to       = [loki.process.containers.receiver]
+}
+
+loki.process "containers" {
+	// Caddy: log de acesso JSON. Status e host viram metadados (não labels: cardinalidade).
+	stage.match {
+		selector = "{service=\"caddy\"}"
+
+		stage.json {
+			expressions = {
+				level     = "level",
+				logger    = "logger",
+				status    = "status",
+				host      = "request.host",
+				client_ip = "request.client_ip",
+			}
+		}
+
+		stage.labels {
+			values = {level = ""}
+		}
+
+		stage.structured_metadata {
+			values = {status = "", host = "", client_ip = ""}
+		}
+	}
+
+	// Smokescreen: uma linha JSON por decisão de saída (CANONICAL-PROXY-DECISION)
+	stage.match {
+		selector = "{service=\"egress-proxy\"}"
+
+		stage.json {
+			expressions = {
+				msg                = "msg",
+				allow              = "allow",
+				requested_host     = "requested_host",
+				decision_reason    = "decision_reason",
+				enforce_would_deny = "enforce_would_deny",
+			}
+		}
+
+		stage.labels {
+			values = {allow = ""}
+		}
+
+		stage.structured_metadata {
+			values = {requested_host = "", enforce_would_deny = ""}
+		}
+	}
+
+	// agent-canvas: logs JSON do agent-server e da automação (LOG_JSON=true na imagem)
+	stage.match {
+		selector = "{service=\"agent-canvas\"}"
+
+		stage.json {
+			expressions = {level = "levelname", trace_id = "trace_id"}
+		}
+
+		stage.labels {
+			values = {level = ""}
+		}
+
+		stage.structured_metadata {
+			values = {trace_id = ""}
+		}
+	}
+
+	// Última barreira: mascara credenciais que escaparem em qualquer log
+	stage.replace {
+		expression = "(sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})"
+		replace    = "***REDACTED***"
+	}
+
+	forward_to = [loki.write.local.receiver]
+}
+
+// ─────────────────────────────── Host (journald) ───────────────────────────────
+
+loki.relabel "journal" {
+	forward_to = []
+
+	rule {
+		source_labels = ["__journal__systemd_unit"]
+		target_label  = "unit"
+	}
+
+	rule {
+		source_labels = ["__journal_syslog_identifier"]
+		target_label  = "syslog_identifier"
+	}
+
+	rule {
+		source_labels = ["__journal_priority_keyword"]
+		target_label  = "level"
+	}
+}
+
+loki.source.journal "host" {
+	max_age       = "12h"
+	path          = "/var/log/journal"
+	relabel_rules = loki.relabel.journal.rules
+	labels        = {source = "journal"}
+	forward_to    = [loki.process.journal.receiver]
+}
+
+loki.process "journal" {
+	// Guarda só a trilha de segurança/infra; o resto do journal é ruído.
+	stage.match {
+		selector = "{source=\"journal\", syslog_identifier!~\"sshd|sshd-session|sudo|fail2ban.*|kernel|docker.*|dockerd|containerd|unattended-upgrade.*|systemd-logind\"}"
+		action   = "drop"
+	}
+
+	// Do kernel, só os bloqueios do UFW.
+	stage.match {
+		selector = "{syslog_identifier=\"kernel\"} != \"[UFW \""
+		action   = "drop"
+	}
+
+	stage.match {
+		selector = "{syslog_identifier=\"kernel\"} |= \"[UFW \""
+
+		stage.static_labels {
+			values = {component = "ufw"}
+		}
+	}
+
+	forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}
+
+// ─────────────────────────────── OTLP dos agentes ───────────────────────────────
+
+otelcol.receiver.otlp "agents" {
+	grpc {
+		endpoint = "0.0.0.0:4317"
+	}
+
+	http {
+		endpoint = "0.0.0.0:4318"
+	}
+
+	output {
+		traces = [otelcol.processor.memory_limiter.default.input]
+		logs   = [otelcol.processor.memory_limiter.default.input]
+	}
+}
+
+otelcol.processor.memory_limiter "default" {
+	check_interval = "1s"
+	limit          = "300MiB"
+
+	output {
+		traces = [otelcol.processor.transform.sanitize.input]
+		logs   = [otelcol.processor.transform.sanitize.input]
+	}
+}
+
+// Redação de segredos (processador GA via OTTL). Os traces carregam prompts,
+// respostas e entradas/saídas de ferramentas: tudo que parecer credencial é mascarado.
+otelcol.processor.transform "sanitize" {
+	error_mode = "ignore"
+
+	// O SDK usa o caminho do executável como service.name; normaliza.
+	trace_statements {
+		context    = "resource"
+		statements = [
+			`set(attributes["service.name"], "openhands-agent") where attributes["service.name"] == nil or IsMatch(attributes["service.name"], ".*(agent-server|agent_server|openhands).*")`,
+			`delete_matching_keys(attributes, "(?i).*(api[_.-]?key|secret|password|token).*")`,
+		]
+	}
+
+	trace_statements {
+		context    = "span"
+		statements = [
+			`delete_key(attributes, "http.request.header.authorization")`,
+			`delete_key(attributes, "http.request.header.cookie")`,
+			`delete_key(attributes, "http.request.header.x-session-api-key")`,
+			`replace_all_patterns(attributes, "value", "sk-(ant-|proj-)?[A-Za-z0-9_-]{16,}", "sk-***")`,
+			`replace_all_patterns(attributes, "value", "gh[pousr]_[A-Za-z0-9]{30,}", "gh*_***")`,
+			`replace_all_patterns(attributes, "value", "github_pat_[A-Za-z0-9_]{40,}", "github_pat_***")`,
+			`replace_all_patterns(attributes, "value", "AKIA[0-9A-Z]{16}", "AKIA***")`,
+			`replace_all_patterns(attributes, "value", "xox[baprs]-[A-Za-z0-9-]{10,}", "xox*-***")`,
+			`replace_all_patterns(attributes, "value", "(?i)bearer [A-Za-z0-9._~+/=-]{16,}", "Bearer ***")`,
+			`replace_all_patterns(attributes, "value", "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----", "***PRIVATE KEY***")`,
+			`truncate_all(attributes, 32768)`,
+		]
+	}
+
+	log_statements {
+		context    = "resource"
+		statements = [
+			`set(attributes["service.name"], "openhands-agent") where attributes["service.name"] == nil or IsMatch(attributes["service.name"], ".*(agent-server|agent_server|openhands).*")`,
+		]
+	}
+
+	log_statements {
+		context    = "log"
+		statements = [
+			`replace_pattern(body, "sk-(ant-|proj-)?[A-Za-z0-9_-]{16,}", "sk-***")`,
+			`replace_pattern(body, "gh[pousr]_[A-Za-z0-9]{30,}", "gh*_***")`,
+		]
+	}
+
+	output {
+		traces = [
+			otelcol.processor.batch.default.input,
+			otelcol.connector.spanlogs.llm.input,
+		]
+		logs = [otelcol.processor.batch.default.input]
+	}
+}
+
+otelcol.processor.batch "default" {
+	timeout         = "5s"
+	send_batch_size = 1024
+
+	output {
+		traces = [otelcol.exporter.otlp.tempo.input]
+		logs   = [otelcol.exporter.loki.agents.input]
+	}
+}
+
+otelcol.exporter.otlp "tempo" {
+	client {
+		endpoint = "tempo:4317"
+
+		tls {
+			insecure = true
+		}
+	}
+}
+
+// Uma linha de log por span (sem conteúdo de prompt): dá para somar tokens e
+// custo no Loki com `| logfmt | unwrap gen_ai_usage_input_tokens`.
+otelcol.connector.spanlogs "llm" {
+	spans           = true
+	span_attributes = [
+		"lmnr.span.type",
+		"gen_ai.system",
+		"gen_ai.request.model",
+		"gen_ai.response.model",
+		"gen_ai.usage.input_tokens",
+		"gen_ai.usage.output_tokens",
+		"gen_ai.usage.cache_read_input_tokens",
+		"gen_ai.usage.cache_creation_input_tokens",
+		"gen_ai.usage.reasoning_tokens",
+		"gen_ai.usage.cost",
+		"llm.usage.total_tokens",
+	]
+
+	output {
+		logs = [otelcol.processor.attributes.spanlogs.input]
+	}
+}
+
+otelcol.processor.attributes "spanlogs" {
+	action {
+		key    = "source"
+		action = "insert"
+		value  = "spanlogs"
+	}
+
+	action {
+		key    = "loki.attribute.labels"
+		action = "insert"
+		value  = "source"
+	}
+
+	// grava só o corpo logfmt (sem o envelope JSON do exporter)
+	action {
+		key    = "loki.format"
+		action = "insert"
+		value  = "raw"
+	}
+
+	output {
+		logs = [otelcol.exporter.loki.agents.input]
+	}
+}
+
+otelcol.exporter.loki "agents" {
+	forward_to = [loki.process.otlp.receiver]
+}
+
+loki.process "otlp" {
+	stage.static_labels {
+		values = {service = "openhands-agent"}
+	}
+
+	forward_to = [loki.write.local.receiver]
+}

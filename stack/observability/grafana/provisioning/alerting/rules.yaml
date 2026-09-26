@@ -1,0 +1,561 @@
+# Regras de alerta (Grafana-managed). Contact point: Telegram.
+# severity: critical → repete a cada 1h; warning/info → a cada 4h.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: infra
+    folder: Alertas
+    interval: 1m
+    rules:
+      - uid: host-disk-low
+        title: Disco quase cheio
+        condition: C
+        data:
+          - datasourceUid: prometheus
+            model:
+              expr: 100 * node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+              instant: true
+              range: false
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 15
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: Disco raiz com {{ humanize $values.B.Value }}% livre
+      - uid: host-memory-low
+        title: Memória disponível baixa
+        condition: C
+        data:
+          - datasourceUid: prometheus
+            model:
+              expr: 100 * node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes
+              instant: true
+              range: false
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 10
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: Só {{ humanize $values.B.Value }}% de RAM disponível
+      - uid: host-cpu-high
+        title: CPU alta sustentada
+        condition: C
+        data:
+          - datasourceUid: prometheus
+            model:
+              expr: 100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])))
+              instant: true
+              range: false
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 90
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: CPU em {{ humanize $values.B.Value }}% há 15 min
+      - uid: scrape-target-down
+        title: Componente fora do ar
+        condition: C
+        data:
+          - datasourceUid: prometheus
+            model:
+              expr: min by (job) (up)
+              instant: true
+              range: false
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
+        for: 5m
+        noDataState: Alerting
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: Prometheus não alcança o job {{ $labels.job }}
+      - uid: public-url-down
+        title: URL pública fora do ar
+        condition: C
+        data:
+          - datasourceUid: prometheus
+            model:
+              expr: probe_success{job="blackbox-http"}
+              instant: true
+              range: false
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
+        for: 3m
+        noDataState: Alerting
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.instance }} não responde de fora'
+      - uid: canvas-backend-down
+        title: Backend do OpenHands fora
+        condition: C
+        data:
+          - datasourceUid: prometheus
+            model:
+              expr: probe_success{job="blackbox-internal"}
+              instant: true
+              range: false
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
+        for: 3m
+        noDataState: Alerting
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.instance }} não está pronto'
+      - uid: tls-cert-expiring
+        title: Certificado TLS vencendo
+        condition: C
+        data:
+          - datasourceUid: prometheus
+            model:
+              expr: (probe_ssl_earliest_cert_expiry{job="blackbox-http"} - time()) / 86400
+              instant: true
+              range: false
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 14
+        for: 1h
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: Certificado de {{ $labels.instance }} vence em {{ humanize $values.B.Value }} dias (a renovação automática do Caddy falhou?)
+      - uid: container-oom
+        title: Container morto por falta de memória
+        condition: C
+        data:
+          - datasourceUid: prometheus
+            model:
+              expr: sum by (service) (increase(container_oom_events_total{service!=""}[15m]))
+              instant: true
+              range: false
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.service }} sofreu OOM kill nos últimos 15 min'
+      - uid: container-restart-loop
+        title: Container reiniciando em loop
+        condition: C
+        data:
+          - datasourceUid: prometheus
+            model:
+              expr: sum by (service) (changes(container_start_time_seconds{service!=""}[30m]))
+              instant: true
+              range: false
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 2
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.service }} reiniciou {{ $values.B.Value }} vezes em 30 min'
+  - orgId: 1
+    name: agentes
+    folder: Alertas
+    interval: 1m
+    rules:
+      - uid: llm-error-rate
+        title: Erros nas chamadas de LLM
+        condition: C
+        data:
+          - datasourceUid: prometheus
+            model:
+              expr: sum(rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR",gen_ai_request_model!=""}[10m])) / sum(rate(traces_spanmetrics_calls_total{gen_ai_request_model!=""}[10m]))
+              instant: true
+              range: false
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0.2
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ humanizePercentage $values.B.Value }} das chamadas de LLM falhando'
+      - uid: egress-denied
+        title: Saídas bloqueadas pelo proxy
+        condition: C
+        data:
+          - datasourceUid: loki
+            model:
+              expr: sum(count_over_time({service="egress-proxy", allow="false"} [15m]))
+              queryType: instant
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 20
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $values.B.Value }} conexões de saída negadas em 15 min'
+  - orgId: 1
+    name: seguranca
+    folder: Alertas
+    interval: 1m
+    rules:
+      - uid: ssh-login
+        title: Login SSH no servidor
+        condition: C
+        data:
+          - datasourceUid: loki
+            model:
+              expr: sum(count_over_time({source="journal", syslog_identifier=~"sshd.*"} |= "Accepted" [5m]))
+              queryType: instant
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: info
+        annotations:
+          summary: Novo login SSH aceito (confira se foi você)
+      - uid: fail2ban-bans
+        title: fail2ban banindo IPs
+        condition: C
+        data:
+          - datasourceUid: loki
+            model:
+              expr: sum(count_over_time({source="journal", syslog_identifier=~"fail2ban.*"} |= " Ban " [15m]))
+              queryType: instant
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 5
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $values.B.Value }} IPs banidos em 15 min'
+      - uid: canvas-auth-failures
+        title: Tentativas de acesso sem chave
+        condition: C
+        data:
+          - datasourceUid: loki
+            model:
+              expr: sum(count_over_time({service="caddy"} | status=~"401|403" [5m]))
+              queryType: instant
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 30
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $values.B.Value }} respostas 401/403 em 5 min: alguém testando chaves?'

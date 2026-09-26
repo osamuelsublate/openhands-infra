@@ -1,0 +1,17 @@
+modules:
+  # URLs públicas: exige HTTPS válido (gera probe_ssl_earliest_cert_expiry)
+  http_2xx:
+    prober: http
+    timeout: 10s
+    http:
+      preferred_ip_protocol: ip4
+      follow_redirects: true
+      fail_if_not_ssl: true
+
+  # Endpoints internos via rede Docker (HTTP puro)
+  http_2xx_internal:
+    prober: http
+    timeout: 5s
+    http:
+      preferred_ip_protocol: ip4
+      follow_redirects: false

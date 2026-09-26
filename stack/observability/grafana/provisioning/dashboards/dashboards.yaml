@@ -1,0 +1,14 @@
+apiVersion: 1
+
+# O git é a fonte da verdade: dashboards editados na UI precisam ser
+# exportados (JSON) e commitados em stack/observability/grafana/dashboards/.
+providers:
+  - name: repo
+    orgId: 1
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true

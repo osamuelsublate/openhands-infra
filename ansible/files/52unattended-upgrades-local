@@ -1,0 +1,25 @@
+// Gerenciado pelo Ansible (openhands-infra).
+// Patches de segurança automáticos; reboot de madrugada quando o kernel exigir.
+Unattended-Upgrade::Allowed-Origins {
+        "${distro_id}:${distro_codename}";
+        "${distro_id}:${distro_codename}-security";
+        "${distro_id}ESMApps:${distro_codename}-apps-security";
+        "${distro_id}ESM:${distro_codename}-infra-security";
+};
+
+// Atualizar o Docker reinicia todos os containers: fazemos isso de propósito, à mão.
+Unattended-Upgrade::Package-Blacklist {
+        "docker-ce";
+        "docker-ce-cli";
+        "containerd.io";
+        "docker-buildx-plugin";
+        "docker-compose-plugin";
+};
+
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+// 06:30 UTC = 03:30 em Brasília (o backup roda às 04:15 de Brasília)
+Unattended-Upgrade::Automatic-Reboot-Time "06:30";
+Unattended-Upgrade::SyslogEnable "true";

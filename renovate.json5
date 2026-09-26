@@ -1,0 +1,64 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    "config:recommended",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigests",
+    ":dependencyDashboard",
+    ":semanticCommits",
+  ],
+  timezone: "America/Sao_Paulo",
+  schedule: ["before 9am on monday"],
+  automerge: false,
+  prConcurrentLimit: 5,
+  labels: ["deps"],
+  packageRules: [
+    {
+      description: "OpenHands lança 2x por semana: PR próprio, sempre revisado à mão",
+      matchPackageNames: ["ghcr.io/openhands/agent-canvas"],
+      groupName: "openhands",
+      schedule: ["at any time"],
+    },
+    {
+      description: "Stack Grafana/Prometheus junta",
+      matchDatasources: ["docker"],
+      matchPackageNames: ["grafana/**", "prom/**", "ghcr.io/google/cadvisor"],
+      groupName: "observabilidade",
+    },
+    {
+      description: "Majors exigem aprovação no dashboard (Tempo 3→4, Grafana 13→14...)",
+      matchUpdateTypes: ["major"],
+      dependencyDashboardApproval: true,
+    },
+    {
+      description: "Atualizações só de digest: agrupadas uma vez por mês",
+      matchUpdateTypes: ["digest", "pinDigest"],
+      groupName: "digests",
+      schedule: ["before 9am on the first day of the month"],
+    },
+    {
+      matchManagers: ["github-actions", "pre-commit"],
+      groupName: "ferramentas de CI",
+    },
+  ],
+  "pre-commit": { enabled: true },
+  customManagers: [
+    {
+      description: "Commit fixado do Smokescreen (não há releases)",
+      customType: "regex",
+      managerFilePatterns: ["/^stack/compose\\.yaml$/"],
+      matchStrings: ["SMOKESCREEN_REF: (?<currentDigest>[a-f0-9]{40})"],
+      datasourceTemplate: "git-refs",
+      depNameTemplate: "stripe/smokescreen",
+      packageNameTemplate: "https://github.com/stripe/smokescreen",
+      currentValueTemplate: "master",
+    },
+    {
+      description: "Versões fixadas em uvx/CI",
+      customType: "regex",
+      managerFilePatterns: ["/^justfile$/", "/^\\.github/workflows/.+\\.ya?ml$/"],
+      matchStrings: ["--from (?<depName>ansible-core|ansible-lint)==(?<currentValue>[0-9.]+)"],
+      datasourceTemplate: "pypi",
+    },
+  ],
+}

@@ -1,0 +1,107 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Caddy: borda HTTPS com certificados automáticos (Let's Encrypt, renovação sozinha)
+# Variáveis vêm do compose.yaml ({$VAR}).
+# ══════════════════════════════════════════════════════════════════════════════
+{
+	email {$ACME_EMAIL}
+	acme_ca {$ACME_CA}
+
+	# A API de admin fica só no localhost do container (necessária para `caddy reload`).
+	admin localhost:2019
+
+	metrics {
+		per_host
+	}
+
+	servers {
+		protocols h1 h2 h3
+	}
+
+	log default {
+		output stdout
+		format json
+	}
+}
+
+# ── Snippets ────────────────────────────────────────────────────────────────
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+		-Server
+		-X-Powered-By
+	}
+}
+
+# Log de acesso em JSON, sem credenciais: a chave de sessão do OpenHands trafega
+# no header X-Session-API-Key e, em clientes antigos, na query string.
+(access_log) {
+	log {
+		output stdout
+		format filter {
+			request>headers>X-Session-Api-Key delete
+			request>headers>Authorization delete
+			request>headers>Cookie delete
+			request>uri query {
+				replace session_api_key REDACTED
+				replace tkn REDACTED
+			}
+			wrap json
+		}
+	}
+}
+
+# Allowlist opcional de IPs (CADDY_ALLOWED_CIDRS no .env; padrão = todo mundo).
+(ip_allowlist) {
+	@blocked not remote_ip {$CADDY_ALLOWED_CIDRS}
+	respond @blocked "Forbidden" 403
+}
+
+# ── openhands.samuelsublate.com.br ─────────────────────────────────────────
+# Duas aplicações na mesma origem, em rotas exclusivas (`handle`):
+#   /grafana/*  → Grafana (serve_from_sub_path)
+#   o resto     → OpenHands Agent Canvas
+# Atenção: mesma origem = um XSS no Grafana alcança o localStorage do OpenHands,
+# onde fica a chave de acesso (OpenHands#16492). Risco aceito; ver docs/security.md.
+
+{$OH_DOMAIN} {
+	import security_headers
+	import access_log
+	import ip_allowlist
+	encode zstd gzip
+
+	@grafana path /grafana /grafana/*
+	handle @grafana {
+		reverse_proxy grafana:3000
+	}
+
+	handle {
+		# Documentação da API do agent-server é pública por padrão: não expor.
+		@apidocs path /docs /docs/* /redoc /redoc/* /openapi.json
+		respond @apidocs 404
+
+		# Editor VSCode desativado (o token dele é a própria chave de API).
+		@vscode path /vscode /vscode/*
+		respond @vscode 404
+
+		# Só a instância em modo público (porta 8080): pede a chave na tela.
+		# NUNCA apontar para a 8000, que embute a chave no HTML.
+		reverse_proxy agent-canvas:8080 {
+			flush_interval -1
+			stream_close_delay 5m
+			transport http {
+				dial_timeout 5s
+			}
+		}
+	}
+}
+
+# ── Métricas internas (sem porta publicada; o Prometheus lê via rede `obs`) ──
+
+:9180 {
+	metrics /metrics
+}

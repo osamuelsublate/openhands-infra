@@ -1,0 +1,7 @@
+# Destinatários age que conseguem decifrar os segredos.
+# Recomendado: 2 chaves (a do laptop + uma de recuperação guardada OFFLINE).
+# Depois de mudar a lista: just secrets-updatekeys
+creation_rules:
+  - path_regex: (^|/)secrets/[^/]+\.sops\.env$
+    age: >-
+      AGE_RECIPIENTS_PLACEHOLDER

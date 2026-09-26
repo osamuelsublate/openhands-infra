@@ -1,0 +1,42 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# ACL de saída dos agentes (Smokescreen)
+#
+# action:
+#   report  → LIBERA tudo e registra; destinos fora da lista saem com
+#             enforce_would_deny=true (fase de observação: comece aqui)
+#   enforce → só libera o que está em allowed_domains (allowlist de verdade)
+#
+# Para montar a allowlist, veja no Grafana o painel "Egress → destinos que
+# seriam bloqueados" e adicione aqui o que for legítimo.
+# Mudanças exigem: just restart egress-proxy
+# ══════════════════════════════════════════════════════════════════════════════
+version: v1
+
+# Bloqueados mesmo em modo report.
+global_deny_list:
+  - "*.posthog.com" # telemetria de produto do OpenHands
+  - posthog.com
+
+services: []
+
+default:
+  project: openhands
+  action: report
+  allowed_domains:
+    # Provedores de LLM
+    - api.anthropic.com
+    - api.openai.com
+    - openrouter.ai
+    - generativelanguage.googleapis.com
+    # GitHub
+    - github.com
+    - "*.github.com"
+    - "*.githubusercontent.com"
+    - codeload.github.com
+    # Pacotes
+    - pypi.org
+    - files.pythonhosted.org
+    - registry.npmjs.org
+    - "*.npmjs.org"
+    - deb.debian.org
+    - security.debian.org

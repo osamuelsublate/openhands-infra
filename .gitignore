@@ -1,0 +1,41 @@
+# --- segredos: texto plano nunca entra no git ---
+.env
+.env.*
+*.env
+!*.sops.env
+!ci/dummy.env
+!secrets/prod.env.example
+*.dec.*
+*.decrypted*
+*.plain.*
+secrets/*
+!secrets/*.sops.*
+!secrets/prod.env.example
+!secrets/README.md
+keys.txt
+*.agekey
+*.pem
+*.key
+id_*
+!*.pub
+
+# --- dados de runtime (nunca no git) ---
+data/
+volumes/
+backups/
+*.sqlite
+*.db
+*.log
+
+# --- ferramentas ---
+.venv/
+__pycache__/
+*.retry
+.ansible/
+.direnv/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+*.swp
+*~

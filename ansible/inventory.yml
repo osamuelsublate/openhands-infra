@@ -1,0 +1,8 @@
+all:
+  hosts:
+    openhands:
+      ansible_host: 179.199.150.4
+      # Depois do bootstrap o acesso é só pelo usuário deploy.
+      # No primeiro run: just bootstrap (usa -e ansible_user=root)
+      ansible_user: deploy
+      ansible_python_interpreter: /usr/bin/python3

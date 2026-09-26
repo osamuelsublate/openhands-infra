@@ -1,0 +1,253 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Provisionamento do host (Ubuntu 24.04, Hostinger VPS). Idempotente.
+#
+#   just provision          → aplica
+#   just provision-check    → dry-run com diff (detecta drift)
+#
+# Primeiro acesso (ainda como root), em duas etapas para não se trancar fora:
+#   1) just bootstrap        → cria o usuário deploy; root continua entrando (só com chave)
+#   2) teste `ssh deploy@...` em OUTRO terminal
+#   3) just lockdown         → PermitRootLogin no, AllowUsers deploy
+# Quebra-vidro: console VNC do hPanel da Hostinger.
+# ══════════════════════════════════════════════════════════════════════════════
+- name: Provisionar servidor OpenHands
+  hosts: openhands
+  become: true
+
+  vars:
+    deploy_user: deploy
+    deploy_pubkeys:
+      - "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+    stack_dir: /opt/openhands
+    timezone: Etc/UTC
+    swap_size_mb: 4096
+    # false durante o bootstrap; `just lockdown` passa true
+    ssh_lockdown: false
+    ssh_allow_users: "{{ [deploy_user] if ssh_lockdown | bool else ['root', deploy_user] }}"
+    ssh_permit_root: "{{ 'no' if ssh_lockdown | bool else 'prohibit-password' }}"
+
+  handlers:
+    # O 24.04 usa ativação por socket: cada conexão nova já lê a config.
+    # try-reload-or-restart cobre os dois modos sem falhar se o serviço estiver parado.
+    - name: Recarregar ssh
+      ansible.builtin.command: systemctl try-reload-or-restart ssh.service # noqa: command-instead-of-module (o módulo não tem try-reload-or-restart)
+      changed_when: true
+
+    - name: Reiniciar fail2ban
+      ansible.builtin.systemd_service:
+        name: fail2ban
+        state: restarted
+
+    - name: Aplicar sysctl
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+
+    - name: Reiniciar journald
+      ansible.builtin.systemd_service:
+        name: systemd-journald
+        state: restarted
+
+    - name: Reiniciar docker
+      ansible.builtin.systemd_service:
+        name: docker
+        state: restarted
+
+  tasks:
+    # ───────────────────────── Pacotes base ─────────────────────────
+    - name: Pacotes base
+      ansible.builtin.apt:
+        name: [ufw, fail2ban, unattended-upgrades, needrestart, rsync, ca-certificates, curl, jq, python3-systemd]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Fuso horário do host (containers usam TZ próprio)
+      community.general.timezone:
+        name: "{{ timezone }}"
+
+    # ───────────────────────── Usuário de deploy ─────────────────────────
+    # Atenção: grupo docker == root. O modelo honesto é "chave do deploy == chave de root".
+    - name: Usuário deploy
+      ansible.builtin.user:
+        name: "{{ deploy_user }}"
+        shell: /bin/bash
+        groups: [docker]
+        append: true
+
+    - name: Chaves SSH do deploy (exclusivas)
+      ansible.posix.authorized_key:
+        user: "{{ deploy_user }}"
+        key: "{{ deploy_pubkeys | join('\n') }}"
+        exclusive: true
+
+    - name: Sudo sem senha para o deploy (não amplia nada além do grupo docker)
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/90-deploy
+        content: "{{ deploy_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: Diretório da stack
+      ansible.builtin.file:
+        path: "{{ stack_dir }}"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: "0750"
+
+    # ───────────────────────── SSH ─────────────────────────
+    # 00- para vencer o 50-cloud-init.conf (no sshd, o primeiro valor lido vale).
+    - name: Hardening do sshd
+      ansible.builtin.template:
+        src: templates/00-hardening.conf.j2
+        dest: /etc/ssh/sshd_config.d/00-hardening.conf
+        mode: "0644"
+        validate: /usr/sbin/sshd -t -f %s # config inválida nunca chega ao disco
+      notify: Recarregar ssh
+
+    # ───────────────────────── Firewall ─────────────────────────
+    # Docker publica portas por fora do UFW: por isso só o Caddy publica (80/443).
+    - name: UFW políticas padrão
+      community.general.ufw:
+        direction: "{{ item.direction }}"
+        default: "{{ item.policy }}"
+      loop:
+        - { direction: incoming, policy: deny }
+        - { direction: outgoing, policy: allow }
+        - { direction: routed, policy: deny }
+
+    - name: UFW SSH com rate limit
+      community.general.ufw:
+        rule: limit
+        port: "22"
+        proto: tcp
+        comment: ssh
+
+    - name: UFW web
+      community.general.ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        comment: "{{ item.comment }}"
+      loop:
+        - { port: "80", proto: tcp, comment: http }
+        - { port: "443", proto: tcp, comment: https }
+        - { port: "443", proto: udp, comment: http3 }
+
+    - name: UFW Prometheus → node-exporter (bridge br-hostmetrics)
+      community.general.ufw:
+        rule: allow
+        interface: br-hostmetrics
+        direction: in
+        from_ip: 172.31.250.0/24
+        to_port: "9100"
+        proto: tcp
+        comment: node-exporter
+
+    - name: UFW logging
+      community.general.ufw:
+        logging: low
+
+    - name: UFW ligado
+      community.general.ufw:
+        state: enabled
+
+    # ───────────────────────── fail2ban ─────────────────────────
+    - name: Fail2ban loga no journald (o Alloy lê de lá)
+      ansible.builtin.copy:
+        src: files/fail2ban.local
+        dest: /etc/fail2ban/fail2ban.local
+        mode: "0644"
+      notify: Reiniciar fail2ban
+
+    - name: Fail2ban jail do sshd
+      ansible.builtin.copy:
+        src: files/fail2ban-sshd.local
+        dest: /etc/fail2ban/jail.d/sshd.local
+        mode: "0644"
+      notify: Reiniciar fail2ban
+
+    - name: Fail2ban ativo
+      ansible.builtin.systemd_service:
+        name: fail2ban
+        enabled: true
+        state: started
+
+    # ───────────────────────── Atualizações automáticas ─────────────────────────
+    - name: Atualizações periódicas
+      ansible.builtin.copy:
+        src: files/20auto-upgrades
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        mode: "0644"
+
+    - name: Política do unattended-upgrades (Docker fica de fora)
+      ansible.builtin.copy:
+        src: files/52unattended-upgrades-local
+        dest: /etc/apt/apt.conf.d/52unattended-upgrades-local
+        mode: "0644"
+
+    - name: Needrestart reinicia serviços sozinho
+      ansible.builtin.copy:
+        dest: /etc/needrestart/conf.d/50-auto.conf
+        content: "$nrconf{restart} = 'a';\n"
+        mode: "0644"
+
+    # ───────────────────────── Kernel e journald ─────────────────────────
+    - name: Parâmetros de kernel (sysctl)
+      ansible.builtin.copy:
+        src: files/60-hardening.conf
+        dest: /etc/sysctl.d/60-hardening.conf
+        mode: "0644"
+      notify: Aplicar sysctl
+
+    - name: Diretório de drop-ins do journald
+      ansible.builtin.file:
+        path: /etc/systemd/journald.conf.d
+        state: directory
+        mode: "0755"
+
+    - name: Journald persistente e limitado (o Alloy lê /var/log/journal)
+      ansible.builtin.copy:
+        src: files/journald.conf
+        dest: /etc/systemd/journald.conf.d/50-openhands.conf
+        mode: "0644"
+      notify: Reiniciar journald
+
+    # ───────────────────────── Swap ─────────────────────────
+    - name: Arquivo de swap
+      ansible.builtin.command: >-
+        bash -c 'fallocate -l {{ swap_size_mb }}M /swapfile && chmod 600 /swapfile && mkswap /swapfile'
+      args:
+        creates: /swapfile
+
+    - name: Swap no fstab
+      ansible.posix.mount:
+        src: /swapfile
+        path: none
+        fstype: swap
+        opts: sw
+        state: present
+
+    - name: Swap ligada
+      ansible.builtin.command: swapon -a
+      changed_when: false
+
+    # ───────────────────────── Docker ─────────────────────────
+    # Reiniciar o dockerd derruba os containers (live-restore ajuda nas próximas vezes).
+    - name: Configuração do daemon Docker (daemon.json)
+      ansible.builtin.copy:
+        src: files/daemon.json
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        validate: dockerd --validate --config-file %s
+      notify: Reiniciar docker
+
+    - name: Diretório do textfile collector do node-exporter
+      ansible.builtin.file:
+        path: /var/lib/node_exporter/textfile
+        state: directory
+        mode: "0755"
+
+    - name: Docker Compose v2 disponível
+      ansible.builtin.command: docker compose version
+      changed_when: false

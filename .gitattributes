@@ -1,0 +1,3 @@
+* text=auto eol=lf
+*.sops.* -diff linguist-generated
+stack/observability/grafana/dashboards/**/*.json linguist-generated

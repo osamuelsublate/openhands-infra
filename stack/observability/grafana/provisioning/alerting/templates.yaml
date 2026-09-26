@@ -1,0 +1,10 @@
+apiVersion: 1
+
+# Conteúdo de template não passa por interpolação de ambiente.
+templates:
+  - orgId: 1
+    name: telegram
+    template: |
+      {{ define "telegram.message" }}{{ range .Alerts }}{{ if eq .Status "firing" }}🔥{{ else }}✅{{ end }} <b>{{ .Labels.alertname }}</b> [{{ .Labels.severity }}]
+      {{ .Annotations.summary }}
+      {{ end }}{{ end }}

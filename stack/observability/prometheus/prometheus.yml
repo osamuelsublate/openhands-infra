@@ -1,0 +1,74 @@
+# Prometheus coleta TODAS as métricas diretamente (pull).
+# O Alloy cuida só de logs e traces; o Tempo empurra span metrics via remote-write.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  scrape_native_histograms: true
+  external_labels:
+    host: srv2012565
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs: [{ targets: ["localhost:9090"] }]
+
+  # node-exporter roda na rede do host e escuta só no gateway da bridge `hostmetrics`
+  - job_name: node
+    static_configs: [{ targets: ["172.31.250.1:9100"] }]
+
+  - job_name: cadvisor
+    static_configs: [{ targets: ["cadvisor:8080"] }]
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "container_(tasks_state|memory_failures_total|blkio_device_usage_total|network_(tcp|udp)6?_usage_total)"
+        action: drop
+      # rótulo curto e estável por serviço do compose
+      - source_labels: [container_label_com_docker_compose_service]
+        target_label: service
+
+  - job_name: caddy
+    static_configs: [{ targets: ["caddy:9180"] }]
+
+  - job_name: egress-proxy
+    static_configs: [{ targets: ["egress-proxy:9810"] }]
+
+  - job_name: alloy
+    static_configs: [{ targets: ["alloy:12345"] }]
+
+  - job_name: loki
+    static_configs: [{ targets: ["loki:3100"] }]
+
+  - job_name: tempo
+    static_configs: [{ targets: ["tempo:3200"] }]
+
+  - job_name: grafana
+    metrics_path: /grafana/metrics # serve_from_sub_path
+    static_configs: [{ targets: ["grafana:3000"] }]
+
+  - job_name: blackbox-exporter
+    static_configs: [{ targets: ["blackbox:9115"] }]
+
+  # Visão de fora: as URLs públicas respondem, com TLS válido?
+  - job_name: blackbox-http
+    metrics_path: /probe
+    params: { module: [http_2xx] }
+    static_configs:
+      - targets:
+          - https://openhands.samuelsublate.com.br/ready
+          - https://openhands.samuelsublate.com.br/grafana/api/health
+    relabel_configs:
+      - { source_labels: [__address__], target_label: __param_target }
+      - { source_labels: [__param_target], target_label: instance }
+      - { target_label: __address__, replacement: "blackbox:9115" }
+
+  # Visão de dentro: os backends do agent-canvas estão prontos?
+  - job_name: blackbox-internal
+    metrics_path: /probe
+    params: { module: [http_2xx_internal] }
+    static_configs:
+      - targets:
+          - http://agent-canvas:8080/ready
+          - http://agent-canvas:8080/api/automation/ready
+    relabel_configs:
+      - { source_labels: [__address__], target_label: __param_target }
+      - { source_labels: [__param_target], target_label: instance }
+      - { target_label: __address__, replacement: "blackbox:9115" }

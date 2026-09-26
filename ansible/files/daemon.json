@@ -1,0 +1,8 @@
+{
+  "log-driver": "local",
+  "log-opts": { "max-size": "20m", "max-file": "5" },
+  "live-restore": true,
+  "userland-proxy": false,
+  "default-address-pools": [{ "base": "172.30.0.0/16", "size": 24 }],
+  "default-ulimits": { "nofile": { "Name": "nofile", "Soft": 65536, "Hard": 65536 } }
+}

@@ -1,0 +1,463 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# openhands-infra: stack completa (OpenHands Agent Canvas + borda + observabilidade)
+#
+# Topologia de rede (ver docs/architecture.md):
+#   internet ─▶ caddy ─▶ agent-canvas:8080 (modo público, sem chave embutida)
+#                      ─▶ grafana:3000
+#   agent-canvas ─▶ egress-proxy (smokescreen) ─▶ internet   (única saída do agente)
+#   agent-canvas ─▶ alloy (OTLP) ─▶ tempo / loki ◀─ prometheus ◀─ grafana
+#
+# Regras de ouro:
+#   • Só o Caddy publica portas no host. Docker ignora o UFW para portas publicadas.
+#   • O agent-canvas vive APENAS em redes `internal: true`, então a única rota
+#     para fora é o egress-proxy.
+#   • Toda imagem é fixada por tag + digest; o Renovate abre PRs para atualizar.
+# ══════════════════════════════════════════════════════════════════════════════
+name: openhands
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+# Padrão seguro para todo serviço; quem precisa de algo diferente sobrescreve.
+x-hardened: &hardened
+  restart: unless-stopped
+  init: true
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  logging: *logging
+  ulimits:
+    nofile: { soft: 65536, hard: 65536 } # containerd 2.1.5+ (Docker 29) baixou o padrão para 1024
+
+x-proxy-env: &proxy-env
+  HTTP_PROXY: http://egress-proxy:4750
+  HTTPS_PROXY: http://egress-proxy:4750
+  http_proxy: http://egress-proxy:4750
+  https_proxy: http://egress-proxy:4750
+  # Os processos do agent-canvas conversam entre si via loopback; o alloy é interno.
+  NO_PROXY: 127.0.0.1,localhost,::1,alloy
+  no_proxy: 127.0.0.1,localhost,::1,alloy
+  NODE_USE_ENV_PROXY: "1" # faz o fetch() do Node respeitar o proxy
+
+services:
+  # ────────────────────────────── Borda ──────────────────────────────
+  caddy:
+    <<: *hardened
+    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
+    cap_add: [NET_BIND_SERVICE]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      OH_DOMAIN: ${OH_DOMAIN:?defina OH_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?defina ACME_EMAIL}
+      ACME_CA: ${ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
+      CADDY_ALLOWED_CIDRS: ${CADDY_ALLOWED_CIDRS:-0.0.0.0/0 ::/0}
+    volumes:
+      - ./caddy:/etc/caddy:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    tmpfs: ["/tmp:size=16m"]
+    networks: [edge, canvas_front, grafana_front, obs]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9180/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 15s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 256m, pids: 256 }
+
+  # ────────────────────────────── OpenHands ──────────────────────────────
+  agent-canvas:
+    <<: *hardened
+    image: ghcr.io/openhands/agent-canvas:1.24.0@sha256:ad0829a7082a71ddfd2d16c1fae5a2172e4ca5a34eba7f03b69bd5b9b1bc54d7
+    # O agente escreve no $HOME inteiro (caches de pip/npm/uv etc.), então sem rootfs read-only.
+    # cap_drop ALL + no-new-privileges neutralizam o sudo sem senha que a imagem traz.
+    read_only: false
+    environment:
+      <<: *proxy-env
+      # A porta 8000 SEMPRE embute a chave de API no HTML (OpenHands#16879).
+      # O Caddy aponta só para a instância em modo público, que pede a chave na tela.
+      PUBLIC_MODE_PORT: "8080"
+      # ATENÇÃO: passar a chave em OH_SESSION_API_KEYS_0, NÃO em LOCAL_BACKEND_API_KEY.
+      # No entrypoint da v1.24.0, LOCAL_BACKEND_API_KEY só protege a automação: o
+      # agent-server sobe SEM autenticação (verificado em teste; ver docs/security.md).
+      # _1, _2... permitem rotação sem downtime.
+      OH_SESSION_API_KEYS_0: "${LOCAL_BACKEND_API_KEY:?gere com: openssl rand -hex 32}"
+      OH_SECRET_KEY: "${OH_SECRET_KEY:?gere com: openssl rand -hex 32}"
+      # O token do editor VSCode é a própria chave de API (software-agent-sdk#4317).
+      OH_ENABLE_VSCODE: "false"
+      OH_MAX_CONCURRENT_RUNS: ${OH_MAX_CONCURRENT_RUNS:-3}
+      OH_BASH_EVENTS_RETENTION_SECONDS: "604800"
+      OH_CONVERSATION_WORKTREE_ROOT: /home/openhands/workspace/worktrees
+      # Telemetria de produto (PostHog) desligada: a imagem traz a chave embutida.
+      VITE_POSTHOG_API_KEY: ""
+      VITE_DO_NOT_TRACK: "1"
+      DO_NOT_TRACK: "1"
+      OH_TELEMETRY_EXPORTER: none
+      AGENT_CANVAS_DISABLE_TELEMETRY: "1"
+      # Traces OpenTelemetry do SDK → Alloy (sem path: o SDK acrescenta /v1/traces e /v1/logs)
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      TZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - canvas_state:/home/openhands/.openhands # settings, segredos cifrados, conversas, automações
+      - canvas_workspace:/home/openhands/workspace
+      - canvas_projects:/projects
+    tmpfs: ["/tmp:size=2g,exec,mode=1777"]
+    shm_size: 1g # Chromium da ferramenta de browser
+    networks: [canvas_front, agent_egress, telemetry]
+    depends_on:
+      egress-proxy: { condition: service_started }
+      alloy: { condition: service_started, required: false }
+    labels:
+      docker-volume-backup.stop-during-backup: "openhands"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ready >/dev/null && curl -fsS http://127.0.0.1:8080/api/automation/ready >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+      start_interval: 5s
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        limits: { cpus: "3.0", memory: 8g, pids: 4096 }
+
+  egress-proxy:
+    <<: *hardened
+    build:
+      context: ./egress
+      args:
+        SMOKESCREEN_REF: c8bfe28c88f50107fe25578fcf549999c7003070
+    image: local/smokescreen # tag única; a versão real é o SMOKESCREEN_REF acima
+    pull_policy: build
+    command:
+      - --config-file=/etc/smokescreen/smokescreen.yaml
+      - --expose-prometheus-metrics
+      - --prometheus-listen-ip=0.0.0.0
+      - --prometheus-port=9810
+    volumes:
+      - ./egress:/etc/smokescreen:ro
+    networks: [agent_egress, egress_out, obs]
+    # imagem distroless (sem shell): a saúde vem do `up{job="egress-proxy"}` no Prometheus
+    stop_grace_period: 15s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 256m, pids: 512 }
+
+  # ────────────────────────────── Observabilidade ──────────────────────────────
+  prometheus:
+    <<: *hardened
+    image: prom/prometheus:v3.13.3@sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=15GB
+      - --web.enable-remote-write-receiver # span metrics do Tempo
+      - --enable-feature=exemplar-storage # links de métricas → traces
+    volumes:
+      - ./observability/prometheus:/etc/prometheus:ro
+      - prometheus_data:/prometheus
+    networks: [obs, hostmetrics]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1536m, pids: 512 }
+
+  loki:
+    <<: *hardened
+    image: grafana/loki:3.7.8@sha256:1107dd5274e0ada47e42472b7a7e71f3b2a2fe878878108f3e2f9e51528f0193
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    environment:
+      GOMEMLIMIT: 800MiB
+    volumes:
+      - ./observability/loki:/etc/loki:ro
+      - loki_data:/loki
+    tmpfs: ["/tmp:size=64m"]
+    networks: [obs]
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g, pids: 512 }
+
+  tempo:
+    <<: *hardened
+    image: grafana/tempo:3.0.3@sha256:0296560ac66f8a3600d7fb3014a52c189d4d9c3549ad6ff441bf2409855d68d5
+    command: ["-target=all", "-config.file=/etc/tempo/tempo.yaml"]
+    environment:
+      GOMEMLIMIT: 1100MiB
+    volumes:
+      - ./observability/tempo:/etc/tempo:ro
+      - tempo_data:/var/tempo
+    tmpfs: ["/tmp:size=64m"]
+    networks: [obs]
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1536m, pids: 512 }
+
+  alloy:
+    <<: *hardened
+    image: grafana/alloy:v1.20.0@sha256:f111cce835516c5f99166342be7038496b52ced16667be5a11e19258a3e4cd30
+    # Roda como root (precisa ler o journal do host, root:systemd-journal 0640), mas o
+    # diretório de dados da imagem é do usuário alloy (0770). Montagens do host são :ro.
+    cap_add: [DAC_OVERRIDE]
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --disable-reporting
+    environment:
+      GOMEMLIMIT: 400MiB
+    volumes:
+      - ./observability/alloy:/etc/alloy:ro
+      - alloy_data:/var/lib/alloy/data
+      - /var/log/journal:/var/log/journal:ro
+      - /run/log/journal:/run/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+    tmpfs: ["/tmp:size=64m"]
+    networks: [obs, telemetry, docker_api]
+    depends_on:
+      docker-socket-proxy: { condition: service_started }
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m, pids: 512 }
+
+  # Alloy nunca recebe o docker.sock cru: só leitura de containers/logs/eventos.
+  docker-socket-proxy:
+    <<: *hardened
+    image: lscr.io/linuxserver/socket-proxy:3.4.5@sha256:ca6c0301a652232d02cb0ff9f1c5d20d9b339f391e1c1dffaae6ef3bfc59d009
+    environment:
+      CONTAINERS: "1"
+      NETWORKS: "1" # discovery.docker lê as redes de cada container
+      EVENTS: "1"
+      PING: "1"
+      VERSION: "1"
+      ALLOW_LOGS: "1"
+      INFO: "0"
+      POST: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    tmpfs: ["/run:mode=1777"]
+    networks: [docker_api]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 64m, pids: 128 }
+
+  node-exporter:
+    <<: *hardened
+    image: prom/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
+    # rede e PID do host para métricas corretas; escuta só no IP da bridge `hostmetrics`
+    network_mode: host
+    pid: host
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=172.31.250.1:9100
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+|var/lib/containerd/.+)($|/)
+      - --collector.textfile.directory=/host/var/lib/node_exporter/textfile
+    volumes:
+      - /:/host:ro,rslave
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 128m, pids: 128 }
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.60.6@sha256:b8e7d1093144fd088f425ff003d75a4aa405de075db78dae3bc563730b1bd07a
+    restart: unless-stopped
+    logging: *logging
+    privileged: true # necessário no cgroup v2; fica só na rede interna `obs`
+    devices: ["/dev/kmsg"]
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=30s
+      - --max_housekeeping_interval=60s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service
+      - --disable_metrics=advtcp,cpu_topology,cpuset,hugetlb,memory_numa,process,referenced_memory,resctrl,sched,tcp,udp,percpu,disk
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks: [obs]
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256m, pids: 256 }
+
+  blackbox:
+    <<: *hardened
+    image: prom/blackbox-exporter:v0.28.0@sha256:e753ff9f3fc458d02cca5eddab5a77e1c175eee484a8925ac7d524f04366c2fc
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./observability/blackbox:/etc/blackbox:ro
+    # probe: saída para testar as URLs públicas como um visitante
+    # canvas_front: testar os backends do agent-canvas por dentro
+    networks: [obs, probe, canvas_front]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 64m, pids: 128 }
+
+  grafana:
+    <<: *hardened
+    image: grafana/grafana:13.2.2@sha256:ac461fb352abc50da10a51c7d02462e9c05488f11f53f14b3ad79a8145f638a0
+    environment:
+      # Servido em https://<OH_DOMAIN>/grafana/ (mesma origem do OpenHands)
+      GF_SERVER_DOMAIN: ${OH_DOMAIN:?defina OH_DOMAIN}
+      GF_SERVER_ROOT_URL: https://${OH_DOMAIN}/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SERVER_ENFORCE_DOMAIN: "true"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?defina GRAFANA_ADMIN_PASSWORD}
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_COOKIE_SAMESITE: strict
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_SECURITY_CONTENT_SECURITY_POLICY: "true"
+      # Mesma origem do OpenHands: nunca liberar HTML cru em painéis.
+      GF_PANELS_DISABLE_SANITIZE_HTML: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_ALLOW_ORG_CREATE: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SNAPSHOTS_EXTERNAL_ENABLED: "false"
+      GF_PUBLIC_DASHBOARDS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_LOG_MODE: console
+      GF_LOG_CONSOLE_FORMAT: json
+      GF_DATE_FORMATS_DEFAULT_TIMEZONE: ${TZ:-America/Sao_Paulo}
+      # Lidos pelo provisioning do alerting (contact point do Telegram)
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?crie um bot com o @BotFather}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:?defina TELEGRAM_CHAT_ID}
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    tmpfs: ["/tmp:size=64m"]
+    networks: [grafana_front, obs] # grafana_front tem saída (Telegram)
+    depends_on:
+      prometheus: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 768m, pids: 512 }
+
+  # ────────────────────────────── Backup (profile `backup`) ──────────────────────────────
+  # Ative com COMPOSE_PROFILES=backup no .env. As variáveis BACKUP_* não são
+  # obrigatórias aqui porque o compose interpola até profiles inativos; o
+  # scripts/deploy.sh as exige quando o profile está ligado.
+  backup:
+    <<: *hardened
+    image: offen/docker-volume-backup:v2.49.1@sha256:e1da571e739d73f633f19e7a9f324007907089ffd80b3b7a1d71de5b87f80d77
+    profiles: [backup]
+    cap_add: [DAC_READ_SEARCH] # ler arquivos 0600 dos volumes (ex.: chaves do agent-canvas)
+    environment:
+      BACKUP_CRON_EXPRESSION: ${BACKUP_CRON_EXPRESSION:-15 4 * * *}
+      BACKUP_FILENAME: openhands-%Y-%m-%dT%H-%M-%S.{{ .Extension }}
+      BACKUP_PRUNING_PREFIX: openhands-
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_COMPRESSION: zst
+      BACKUP_STOP_DURING_BACKUP_LABEL: openhands
+      AGE_PUBLIC_KEYS: ${BACKUP_AGE_PUBLIC_KEYS:-}
+      AWS_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      AWS_S3_BUCKET_NAME: ${BACKUP_S3_BUCKET:-}
+      AWS_S3_PATH: ${BACKUP_S3_PATH:-openhands}
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:-}
+      NOTIFICATION_URLS: ${BACKUP_NOTIFICATION_URLS:-}
+      NOTIFICATION_LEVEL: error
+      DOCKER_HOST: tcp://backup-socket-proxy:2375
+      TZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - canvas_state:/backup/canvas_state:ro
+      - canvas_workspace:/backup/canvas_workspace:ro
+      - canvas_projects:/backup/canvas_projects:ro
+      - grafana_data:/backup/grafana_data:ro
+      - caddy_data:/backup/caddy_data:ro
+      - backup_scratch:/tmp # o tar é montado aqui antes do upload (em disco, não em RAM)
+    read_only: false
+    networks: [backup_api, backup_out]
+    depends_on:
+      backup-socket-proxy: { condition: service_started }
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g, pids: 256 }
+
+  # O backup precisa parar/iniciar o agent-canvas: POST liberado só para start/stop.
+  backup-socket-proxy:
+    <<: *hardened
+    image: lscr.io/linuxserver/socket-proxy:3.4.5@sha256:ca6c0301a652232d02cb0ff9f1c5d20d9b339f391e1c1dffaae6ef3bfc59d009
+    profiles: [backup]
+    environment:
+      CONTAINERS: "1"
+      INFO: "1"
+      PING: "1"
+      VERSION: "1"
+      POST: "1"
+      ALLOW_START: "1"
+      ALLOW_STOP: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    tmpfs: ["/run:mode=1777"]
+    networks: [backup_api]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 64m, pids: 128 }
+
+networks:
+  edge: {} # única rede com portas publicadas (Caddy)
+  canvas_front: { internal: true } # caddy ⇄ agent-canvas
+  grafana_front: {} # caddy ⇄ grafana (com saída: alertas no Telegram)
+  agent_egress: { internal: true } # agent-canvas ⇄ egress-proxy
+  egress_out: {} # egress-proxy ⇄ internet
+  telemetry: { internal: true } # agent-canvas ⇄ alloy (OTLP)
+  obs: { internal: true } # backend de observabilidade
+  docker_api: { internal: true } # alloy ⇄ socket-proxy
+  backup_api: { internal: true } # backup ⇄ socket-proxy de backup
+  backup_out: {} # backup ⇄ armazenamento S3
+  probe: {} # blackbox ⇄ internet (testes externos)
+  hostmetrics: # prometheus ⇄ node-exporter (rede do host)
+    driver_opts:
+      com.docker.network.bridge.name: br-hostmetrics
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+          gateway: 172.31.250.1
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}
+  canvas_state: {}
+  canvas_workspace: {}
+  canvas_projects: {}
+  prometheus_data: {}
+  loki_data: {}
+  tempo_data: {}
+  alloy_data: {}
+  grafana_data: {}
+  backup_scratch: {}

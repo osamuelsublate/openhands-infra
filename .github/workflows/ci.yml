@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: pre-commit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: pre-commit/action@v3.0.1
+
+  secrets-scan:
+    name: gitleaks (histórico completo)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --redact -v
+
+  validate:
+    name: configs da stack
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: validar com as mesmas imagens do deploy
+        run: scripts/validate.sh
+
+  ansible:
+    name: ansible-lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: collections
+        working-directory: ansible
+        run: uvx --from ansible-core==2.21.4 ansible-galaxy collection install -r requirements.yml
+      - name: ansible-lint
+        working-directory: ansible
+        run: uvx --from ansible-lint==26.9.0 ansible-lint site.yml

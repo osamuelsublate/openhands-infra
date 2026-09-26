@@ -1,0 +1,16 @@
+[DEFAULT]
+banaction = ufw
+banaction_allports = ufw
+bantime = 1h
+bantime.increment = true
+bantime.maxtime = 1w
+findtime = 10m
+maxretry = 5
+ignoreip = 127.0.0.1/8 ::1
+
+[sshd]
+enabled = true
+# Ubuntu 24.04 não tem rsyslog: lê direto do journald
+backend = systemd
+mode = aggressive
+port = ssh

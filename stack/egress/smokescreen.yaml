@@ -1,0 +1,16 @@
+# Configuração do Smokescreen (chaves em pkg/smokescreen/config_loader.go).
+ip: 0.0.0.0
+port: 4750
+acl_file: /etc/smokescreen/acl.yaml
+
+# Sem mTLS não há "role" por cliente: todo pedido cai na regra `default` da ACL.
+# (Não existe flag de linha de comando para isto; só no arquivo.)
+allow_missing_role: true
+
+connect_timeout: 10s
+max_concurrent_connect_tunnels: 512
+
+# IPs privados, loopback, link-local e CGNAT já são negados por padrão (anti-SSRF):
+# o agente não alcança a rede interna do Docker nem o metadata da nuvem pelo proxy.
+deny_ranges:
+  - 169.254.0.0/16

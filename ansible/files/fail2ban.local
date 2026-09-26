@@ -1,0 +1,3 @@
+[Definition]
+# O Ubuntu grava em /var/log/fail2ban.log por padrão; o journald deixa o Alloy coletar.
+logtarget = SYSTEMD-JOURNAL
