@@ -4,4 +4,4 @@
 creation_rules:
   - path_regex: (^|/)secrets/[^/]+\.sops\.env$
     age: >-
-      AGE_RECIPIENTS_PLACEHOLDER
+      age1mzuy4c8ruhz4yztxdh3h7lre9nc9r2gpdey5dp8pd6qutjt3s9vsmdrc3w
