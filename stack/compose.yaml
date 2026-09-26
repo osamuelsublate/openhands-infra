@@ -64,7 +64,7 @@ services:
     tmpfs: ["/tmp:size=16m"]
     networks: [edge, canvas_front, grafana_front, obs]
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9180/metrics"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9180/metrics"]
       interval: 30s
       timeout: 5s
       retries: 3

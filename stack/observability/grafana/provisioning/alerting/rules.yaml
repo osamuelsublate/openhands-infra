@@ -45,7 +45,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: Disco raiz com {{ humanize $values.B.Value }}% livre
+          summary: Disco raiz com {{ $values.B }}% livre
       - uid: host-memory-low
         title: Memória disponível baixa
         condition: C
@@ -84,7 +84,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: Só {{ humanize $values.B.Value }}% de RAM disponível
+          summary: Só {{ $values.B }}% de RAM disponível
       - uid: host-cpu-high
         title: CPU alta sustentada
         condition: C
@@ -123,7 +123,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: CPU em {{ humanize $values.B.Value }}% há 15 min
+          summary: CPU em {{ $values.B }}% há 15 min
       - uid: scrape-target-down
         title: Componente fora do ar
         condition: C
@@ -279,7 +279,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: Certificado de {{ $labels.instance }} vence em {{ humanize $values.B.Value }} dias (a renovação automática do Caddy falhou?)
+          summary: Certificado de {{ $labels.instance }} vence em {{ $values.B }} dias (a renovação automática do Caddy falhou?)
       - uid: container-oom
         title: Container morto por falta de memória
         condition: C
@@ -357,7 +357,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: '{{ $labels.service }} reiniciou {{ $values.B.Value }} vezes em 30 min'
+          summary: '{{ $labels.service }} reiniciou {{ $values.B }} vezes em 30 min'
   - orgId: 1
     name: agentes
     folder: Alertas
@@ -401,7 +401,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: '{{ humanizePercentage $values.B.Value }} das chamadas de LLM falhando'
+          summary: '{{ $values.B }} das chamadas de LLM falhando'
       - uid: egress-denied
         title: Saídas bloqueadas pelo proxy
         condition: C
@@ -439,7 +439,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: '{{ $values.B.Value }} conexões de saída negadas em 15 min'
+          summary: '{{ $values.B }} conexões de saída negadas em 15 min'
   - orgId: 1
     name: seguranca
     folder: Alertas
@@ -520,7 +520,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: '{{ $values.B.Value }} IPs banidos em 15 min'
+          summary: '{{ $values.B }} IPs banidos em 15 min'
       - uid: canvas-auth-failures
         title: Tentativas de acesso sem chave
         condition: C
@@ -558,4 +558,4 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: '{{ $values.B.Value }} respostas 401/403 em 5 min: alguém testando chaves?'
+          summary: '{{ $values.B }} respostas 401/403 em 5 min: alguém testando chaves?'
