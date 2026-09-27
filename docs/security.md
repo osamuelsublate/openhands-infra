@@ -52,6 +52,7 @@ Nenhum outro serviço publica porta, e o `scripts/validate.sh` falha se isso mud
   - Para isolar de vez: servir o Grafana num subdomínio próprio (uma mudança no `Caddyfile` e no `compose.yaml`).
 
 - **O agente enxerga as próprias variáveis de ambiente**, incluindo `OH_SESSION_API_KEYS_0` e `OH_SECRET_KEY`, porque roda como o mesmo usuário do servidor. Um agente manipulado por prompt injection poderia vazar a chave. Mitigações: ACL do egress em `enforce`, alerta de destinos novos e rotação da chave. A separação completa exigiria o runtime Docker por conversa (que precisa do `docker.sock`, um risco maior).
+- **O agente pode sabotar o próprio servidor.** Ele roda com o mesmo usuário do agent-server e enxerga os mesmos arquivos. Em 27/09/2026 uma conversa encheu o `/tmp` e apagou `/tmp/_MEI*`, derrubando o agent-server. Mitigações: `/tmp` em disco (sem motivo para faxina), healthcheck que se auto-cura e estado das conversas em volume. Isolamento real exigiria o runtime Docker por conversa.
 - **Grupo `docker` equivale a root.** A chave SSH do `deploy` é, na prática, uma chave de root. Proteja-a com senha.
 - **O cAdvisor roda `privileged`** para ler cgroups v2. Fica só na rede interna `obs`.
 - **O backup usa um socket-proxy com POST** (start/stop). É restrito a essas duas ações, sem exec nem criação de containers.

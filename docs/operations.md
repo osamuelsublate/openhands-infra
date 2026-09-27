@@ -96,3 +96,4 @@ O estado do OpenHands só abre com o **mesmo** `OH_SECRET_KEY` que está nos seg
 | `git clone git@github.com:...` falha | SSH (porta 22) não passa pelo proxy HTTP | use URLs `https://` com token |
 | Sem traces no Tempo | Alloy fora ou nenhuma conversa rodou | `just logs alloy`; dashboard *Stack — Saúde* |
 | Alerta "Componente fora do ar" | um scrape falhou por mais de 5 min | o alerta traz o `job`; `just ps` |
+| Canvas: *"Could not determine this backend's agent-server version… reported unknown"* | um agente apagou `/tmp/_MEI*`, onde o binário do agent-server se descompacta | o healthcheck detecta e reinicia o container sozinho em ~1 min; se persistir, `just restart agent-canvas` |
