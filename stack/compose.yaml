@@ -75,9 +75,10 @@ services:
         limits: { cpus: "1.0", memory: 256m, pids: 256 }
 
   # ────────────────────────────── OpenHands ──────────────────────────────
-  # Roda uma vez antes do agent-canvas: /home/openhands/workspace não existe na
-  # imagem, então o Docker cria o volume como root e o agente (UID 10001, sem
-  # capabilities) não consegue escrever nele.
+  # Roda uma vez antes do agent-canvas:
+  #  - /home/openhands/workspace não existe na imagem, então o Docker cria o volume
+  #    como root e o agente (UID 10001, sem capabilities) não conseguiria escrever;
+  #  - /tmp fica em disco e é esvaziado a cada deploy.
   init-volumes:
     image: ghcr.io/openhands/agent-canvas:1.24.0@sha256:ad0829a7082a71ddfd2d16c1fae5a2172e4ca5a34eba7f03b69bd5b9b1bc54d7
     restart: "no"
@@ -90,10 +91,13 @@ services:
         for d in /home/openhands/.openhands /home/openhands/workspace /projects; do
           [ "$$(stat -c %u:%g "$$d")" = "10001:10001" ] || { chown 10001:10001 "$$d"; echo "chown $$d"; }
         done
+        find /tmp -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+        chmod 1777 /tmp
     volumes:
       - canvas_state:/home/openhands/.openhands
       - canvas_workspace:/home/openhands/workspace
       - canvas_projects:/projects
+      - canvas_tmp:/tmp
     logging: *logging
 
   agent-canvas:
@@ -132,7 +136,9 @@ services:
       - canvas_state:/home/openhands/.openhands # settings, segredos cifrados, conversas, automações
       - canvas_workspace:/home/openhands/workspace
       - canvas_projects:/projects
-    tmpfs: ["/tmp:size=2g,exec,mode=1777"]
+      # /tmp em disco: agentes clonam repositórios aqui. Num tmpfs de 2 GB ele
+      # encheu e o agente apagou o /tmp/_MEI* do próprio agent-server (ver healthcheck).
+      - canvas_tmp:/tmp
     shm_size: 1g # Chromium da ferramenta de browser
     networks: [canvas_front, agent_egress, telemetry]
     depends_on:
@@ -142,7 +148,17 @@ services:
     labels:
       docker-volume-backup.stop-during-backup: "openhands"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ready >/dev/null && curl -fsS http://127.0.0.1:8080/api/automation/ready >/dev/null"]
+      # O agent-server é um binário PyInstaller que se descompacta em /tmp/_MEI*.
+      # Se um agente apagar esse diretório, o servidor segue de pé mas reporta
+      # versão "unknown" e o Canvas recusa a conexão. Nesse caso o healthcheck
+      # derruba o PID 1 e o restart policy sobe um processo novo (as conversas
+      # ficam no volume e são retomadas).
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://127.0.0.1:8080/ready >/dev/null &&
+          curl -fsS http://127.0.0.1:8080/api/automation/ready >/dev/null &&
+          { curl -fsS http://127.0.0.1:18000/server_info | grep -qv '"version":"unknown"' || { kill 1; exit 1; }; }
       interval: 30s
       timeout: 10s
       retries: 5
@@ -478,6 +494,7 @@ volumes:
   canvas_state: {}
   canvas_workspace: {}
   canvas_projects: {}
+  canvas_tmp: {}
   prometheus_data: {}
   loki_data: {}
   tempo_data: {}
