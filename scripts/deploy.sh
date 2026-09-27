@@ -44,11 +44,12 @@ ssh "$HOST" "cd '${DIR}' \
   && docker compose up -d --remove-orphans --wait --wait-timeout 300"
 
 step "recarregando provisionamento do Grafana (alertas e datasources só são lidos no boot)"
-# shellcheck disable=SC2016 # variáveis expandidas dentro do container
+# O Host precisa ser o domínio público: o Grafana roda com enforce_domain.
 ssh "$HOST" "cd '${DIR}' && docker compose exec -T grafana sh -c '
-  auth=\$(printf %s \"\$GF_SECURITY_ADMIN_USER:\$GF_SECURITY_ADMIN_PASSWORD\" | base64)
+  auth=\$(printf %s \"\$GF_SECURITY_ADMIN_USER:\$GF_SECURITY_ADMIN_PASSWORD\" | base64 | tr -d \"\\n\")
   for r in datasources alerting; do
-    wget -qO- --post-data= --header \"Authorization: Basic \$auth\" \"http://127.0.0.1:3000/grafana/api/admin/provisioning/\$r/reload\" >/dev/null && echo \"  \$r ok\"
+    wget -qO- --post-data= --header \"Host: \$GF_SERVER_DOMAIN\" --header \"Authorization: Basic \$auth\" \\
+      \"http://127.0.0.1:3000/grafana/api/admin/provisioning/\$r/reload\" >/dev/null && echo \"  \$r ok\" || exit 1
   done'"
 
 rev="$(git rev-parse --short HEAD)"
