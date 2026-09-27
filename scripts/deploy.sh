@@ -43,6 +43,14 @@ ssh "$HOST" "cd '${DIR}' \
   && docker compose pull --ignore-buildable --quiet \
   && docker compose up -d --remove-orphans --wait --wait-timeout 300"
 
+step "recarregando provisionamento do Grafana (alertas e datasources só são lidos no boot)"
+# shellcheck disable=SC2016 # variáveis expandidas dentro do container
+ssh "$HOST" "cd '${DIR}' && docker compose exec -T grafana sh -c '
+  auth=\$(printf %s \"\$GF_SECURITY_ADMIN_USER:\$GF_SECURITY_ADMIN_PASSWORD\" | base64)
+  for r in datasources alerting; do
+    wget -qO- --post-data= --header \"Authorization: Basic \$auth\" \"http://127.0.0.1:3000/grafana/api/admin/provisioning/\$r/reload\" >/dev/null && echo \"  \$r ok\"
+  done'"
+
 rev="$(git rev-parse --short HEAD)"
 ssh "$HOST" "echo '${rev} $(date -u +%FT%TZ)' >> '${DIR}/.deploys'"
 step "no ar: ${rev}"
