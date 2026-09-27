@@ -139,6 +139,9 @@ services:
       # /tmp em disco: agentes clonam repositórios aqui. Num tmpfs de 2 GB ele
       # encheu e o agente apagou o /tmp/_MEI* do próprio agent-server (ver healthcheck).
       - canvas_tmp:/tmp
+      # Regras do servidor injetadas em toda conversa (skill sem gatilho = sempre
+      # no prompt). Só-leitura: o agente não consegue editar nem apagar.
+      - ./agent/skills:/home/openhands/.agents/skills:ro
     shm_size: 1g # Chromium da ferramenta de browser
     networks: [canvas_front, agent_egress, telemetry]
     depends_on:

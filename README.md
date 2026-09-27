@@ -40,7 +40,7 @@ flowchart LR
 | Métricas | **Prometheus 3.13 LTS** + node-exporter + cAdvisor + blackbox | Host, containers, disponibilidade externa, validade do TLS |
 | Logs | **Loki 3.7** via **Alloy 1.20** | Containers, SSH, sudo, fail2ban, UFW |
 | Traces | **Tempo 3.0** | Cada conversa dos agentes: chamadas de LLM, ferramentas, tokens, custo |
-| Visualização e alertas | **Grafana 13.2** | 8 dashboards e 14 alertas provisionados por código, com envio ao Telegram |
+| Visualização e alertas | **Grafana 13.2** | 8 dashboards e 15 alertas provisionados por código, com envio ao Telegram |
 | Backup | **offen/docker-volume-backup** | Cifrado com age, enviado para S3/B2 (opcional) |
 | Host | **Ansible** | Usuário deploy, SSH endurecido, UFW, fail2ban, atualizações automáticas |
 | Segredos | **SOPS + age** | Segredos cifrados dentro do git |

@@ -363,6 +363,45 @@ groups:
     folder: Alertas
     interval: 1m
     rules:
+      - uid: canvas-restarted
+        title: agent-canvas reiniciou
+        condition: C
+        data:
+          - datasourceUid: prometheus
+            model:
+              expr: sum(changes(container_start_time_seconds{service="agent-canvas"}[10m]))
+              instant: true
+              range: false
+              refId: A
+            refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: info
+        annotations:
+          summary: O agent-canvas reiniciou (deploy ou auto-cura do healthcheck). Se não houve deploy, veja os logs.
       - uid: llm-error-rate
         title: Erros nas chamadas de LLM
         condition: C
